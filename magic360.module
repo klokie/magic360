@@ -1,0 +1,193 @@
+<?php
+
+/**
+ * @file
+ * Code for the Magic360 feature.
+ */
+
+include_once 'magic360.features.inc';
+function magic360_menu() {
+  $items['admin/config/media/magic360'] = array(
+    'title' => 'Import Magic360',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('_magic360_import_archive_form'),
+    'access arguments' => array('create magic360 content'),
+  );
+  return $items;
+}
+
+function _magic360_import_archive_form() {
+  // generate a preview of all magic360s currently uploaded
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node');
+  $query->entityCondition('bundle', 'magic360');
+  $items = $query->execute();
+  $nodes = node_load_multiple(array_keys($items['node']));
+  $views = node_view_multiple($nodes);
+
+  // create the form
+  $form = array();
+
+  $form['explain'] = array(
+    '#weight' => -10,
+    '#markup' => t('Upload the ZIP file that contains all the Magic360 SpinMe assets. ' .
+      'This should be a single ZIP file that contains an XML file with the settings data, along ' .
+      'with folders of the small and large images referenced by the XML file.'
+    ),
+  );
+  $form['previews'] = array(
+    '#markup' => drupal_render($views),
+    '#attached' => array('css' => array(drupal_get_path('module', 'magic360') . '/magic360-admin.css')),
+    '#weight' => 50,
+    '#theme_wrappers' => array('container'),
+  );
+  $form['archive_file'] = array(
+    '#type' => 'managed_file',
+    '#weight' => 10,
+    '#title' => t('Import Magic360 archive'),
+    '#title_display' => 'invisible',
+    '#progress_indicator' => 'throbber',
+    '#upload_validators' => array(
+      'file_validate_extensions' => array('zip'),
+    ),
+    '#upload_location' => 'public://magic360_archives/',
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#weight' => 15,
+    '#value' => t('Import'),
+  );
+  return $form;
+}
+
+function _magic360_import_archive_form_submit($form, &$form_state) {
+  global $user;
+
+  $file           = file_load($form_state['values']['archive_file']);
+  $node           = new stdClass();
+  $node->type     = 'magic360';
+  $node->title    = $file->filename;
+  $node->uid      = $user->uid;
+  $node->language = LANGUAGE_NONE;
+  node_object_prepare($node);
+  node_save($node);
+
+  $temp = file_directory_temp() . '/' . md5($file->uri);
+  $source = drupal_realpath($file->uri);
+  @exec("unzip -x {$source} -d {$temp}");
+
+  $xml_files = file_scan_directory($temp, '/\.xml$/');
+  $settings = array();
+  if (!empty($xml_files)) {
+    $xml_file = array_shift($xml_files);
+    $xml = simplexml_load_file($xml_file->uri);
+    $node->field_magic360_rows[LANGUAGE_NONE][0]['value'] = (string) array_shift($xml->xpath('//@verticalSteps[1]'));
+    $node->field_magic360_columns[LANGUAGE_NONE][0]['value'] = (string) array_shift($xml->xpath('//@horizontalSteps[1]'));
+    $node->field_magic360_zoom[LANGUAGE_NONE][0]['value'] = (string) array_shift($xml->xpath('//@zoomSteps[1]'));
+  }
+  $images = file_scan_directory($temp, '/\.jpg$/');
+  foreach ($images as $uri => $image) {
+    $path     = explode('/', $uri);
+    $filename = array_pop($path);
+    $size     = array_pop($path);
+    if ((!empty($filename)) && ($size == 'small' || $size == 'large')) {
+      $image_data  = file_get_contents($image->uri);
+      $newfilename = "public://magic360/{$node->nid}/{$size}-{$filename}";
+      $newfolder   = "public://magic360/{$node->nid}/{$size}";
+      file_prepare_directory($newfolder, FILE_CREATE_DIRECTORY);
+      $newimage = file_save_data($image_data, $newfilename);
+      if ($newimage) {
+        $node->field_magic360_images[LANGUAGE_NONE][] = (array)$newimage;
+      }
+    }
+  }
+  drupal_set_message(t("Imported Magic360 spin set file !archive", array('!archive' => $file->filename)));
+  node_save($node);
+}
+/* Restricting access to this causes error in some cases 
+function magic360_form_field_ui_field_overview_form_alter(&$form, &$form_state) {
+	$form['fields']['field_magic360_columns']['#access'] = FALSE;
+	$form['fields']['field_magic360_rows']['#access'] = FALSE;
+	$form['fields']['field_magic360_images']['#access'] = FALSE;
+	$form['fields']['field_magic360_zoom']['#access'] = FALSE;
+}
+*/
+function magic360_form_magic360_node_form_alter(&$form, &$form_state) {
+  $form['field_magic360_images']['#access'] = FALSE;
+  $form['field_magic360_rows']['#access'] = FALSE;
+  $form['field_magic360_columns']['#access'] = FALSE;
+  $form['field_magic360_zoom']['#access'] = FALSE;
+}
+
+function magic360_init() {
+  if (($library = libraries_load('magic360')) && !empty($library['loaded'])) {
+    //drupal_set_message('Magic360 library loaded.');
+  }
+  else {
+    //drupal_set_message('Magic360 library not loaded.');
+  }
+}
+
+function magic360_field_formatter_info() {
+  return array(
+    'file_magic360' => array(
+      'label' => t('Magic360 spin set'),
+      'field types' => array('image'),
+    ),
+  );
+}
+
+function magic360_field_formatter_view($entity_type, $entity, $field, $instance, $langcode, $items, $display) {
+  $element = array();
+  switch ($display['type']) {
+    case 'file_magic360':
+      if (!empty($items[0]['uri'])) {
+        $img      = theme('image', array('path' => $items[0]['uri']));
+        $filespec = file_create_url($items[0]['uri']);
+        $matches  = array();
+        $replace  = preg_replace('/\/\d+\.jpg$/', '/{row}{col}.jpg', $filespec);
+        $rows     = field_get_items('node', $entity, 'field_magic360_rows');
+        $cols     = field_get_items('node', $entity, 'field_magic360_columns');
+        $zoom     = field_get_items('node', $entity, 'field_magic360_zoom');
+        if (!empty($zoom[0]['value']) && $zoom[0]['value'] == 2) {
+          $rel = "magnify: true; rows: {$rows[0]['value']}; columns: {$cols[0]['value']}; filename:small-{row}{col}.jpg; magnify-filename:large-{row}{col}.jpg;";
+        }
+        else {
+          $rel = "rows: {$rows[0]['value']}; columns:{$cols[0]['value']}; filename:{row}{col}.jpg;";
+        }
+        $element[0] = array(
+          '#markup' => l($img, $filespec, array(
+              'attributes' => array(
+                'rel' => $rel,
+                'class' => array('Magic360'),
+              ),
+              'html' => TRUE,
+            )),
+        );
+      }
+      break;
+  }
+  return $element;
+}
+
+function magic360_libraries_info() {
+  $libraries = array();
+  $libraries['magic360'] = array(
+    'name' => 'Magic360',
+    'vendor url' => 'http://www.magictoolbox.com/',
+    'download url' => 'http://www.magictoolbox.com/magic360/',
+    'version arguments' => array(
+      'file' => 'magic360.js',
+      // Best practice: Document the actual version strings for later reference.
+      // 1.x: Version 1.0
+      'pattern' => '/Magic 360 JS v([\d\.]+)/',
+      'lines' => 5,
+    ),
+    'files' => array(
+      'js' => array('magic360.js'),
+      'css' => array('magic360.css'),
+    ),
+  );
+  return $libraries;
+}
+

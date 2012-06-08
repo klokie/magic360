@@ -1,0 +1,20 @@
+<?php
+function magic360_requirements($phase) {
+  $requirements = array();
+  $t = get_t();
+
+  if ($phase == 'runtime') {
+    $requirements['magic360']['title'] = $t('Magic360');
+    if (($library = libraries_detect('magic360')) && !empty($library['installed'])) {
+      $requirements['magic360']['value'] = $library['version'];
+      $requirements['magic360']['severity'] = REQUIREMENT_OK;
+    }
+    else {
+      $requirements['magic360']['value'] = $library['error'];
+      $requirements['magic360']['description'] = $library['error message'];
+      $requirements['magic360']['severity'] = REQUIREMENT_ERROR;
+    }
+  }
+  return $requirements;
+}
+
